@@ -64,5 +64,3 @@
 | D12 | SD MISO (MOSO) |
 | D13 | SD SCK |
 | D0-D3, D6-D9 | Free |
-
-The markdown problem was `##Power rails`, which needs a space after the `##` to render as a heading. I fixed that and removed the Purpose column. The power rails table now has just From and To.
