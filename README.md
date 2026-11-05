@@ -1,12 +1,12 @@
 # Wiring Table
 
-##Power rails (breadboard)
-| From | To | Purpose |
-|---|---|---|
-| Arduino **5V** | Breadboard **+ rail** | Powers RTC, SD module and LDR dividers |
-| Arduino **GND** | Breadboard **- rail** | Common ground |
-| External 5V supply **(-)** | Breadboard **- rail** (and any Arduino GND) | Common ground between servo supply and Arduino (required) |
-| External 5V supply **(+)** | Servo red wires only | Servo power (do not connect to the Arduino 5V) |
+## Power rails (breadboard)
+| From | To |
+|---|---|
+| Arduino **5V** | Breadboard **+ rail** |
+| Arduino **GND** | Breadboard **- rail** |
+| External 5V supply **(-)** | Breadboard **- rail** (and any Arduino GND) |
+| External 5V supply **(+)** | Servo red wires only (not the Arduino 5V) |
 
 ## DS3231 RTC (I2C)
 | RTC pin | Connects to |
@@ -64,3 +64,5 @@
 | D12 | SD MISO (MOSO) |
 | D13 | SD SCK |
 | D0-D3, D6-D9 | Free |
+
+The markdown problem was `##Power rails`, which needs a space after the `##` to render as a heading. I fixed that and removed the Purpose column. The power rails table now has just From and To.
