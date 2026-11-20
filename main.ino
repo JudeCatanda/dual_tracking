@@ -3,54 +3,97 @@
 #include <SD.h>
 #include <Servo.h>
 #include <RTClib.h>
+#include <Adafruit_INA219.h>
 
-// ---------- Settings ----------
-const long BAUD = 4800;                 // set the Serial Monitor to the same speed
-const bool IGNORE_TIME_WINDOW = true;   // true = always track (bench test)
-const bool PARK_AT_START = true;       // true = move to the start position when powered on
+const long BAUD = 4800;
+const bool IGNORE_TIME_WINDOW = true;
+const bool PARK_AT_START = true;
+const bool SERVOS_ON = true;
+const bool ENABLE_INA = true;
+const bool SERIAL_ALSO_WITH_SD = true;
+const bool SET_CLOCK = false;
 const uint8_t START_HOUR = 9;
 const uint8_t END_HOUR   = 17;
-const int tol   = 30;             // tolerance: adjust for sensitivity
-const int dtime = 10;             // ms between tracking steps
-const int HORIZ_DIR = 1;          // use -1 if it turns away from the light (left/right)
-const int VERT_DIR  = 1;          // use -1 if it turns away from the light (up/down)
-const unsigned long LOG_MS = 5000;      // print (and save, if a card is in) every 5 seconds
-const bool SET_CLOCK = false;     // true once to set the clock, then false and upload again
+const int tol   = 30;
+const int dtime = 10;
+const int HORIZ_DIR = 1;
+const int VERT_DIR  = 1;
+const unsigned long LOG_MS       = 5000;
+const unsigned long POWER_MS     = 1000;
+const unsigned long INA_RETRY_MS = 10000;
+const uint8_t INA_PANEL_ADDR = 0x40;
+const uint8_t INA_UNO_ADDR   = 0x41;
+const uint8_t HORIZ_PIN = 5, VERT_PIN = 4, SD_CS = 10;
+int ldrlt = A0;
+int ldrrt = A3;
+int ldrld = A1;
+int ldrrd = A2;
 
-// ---------- Servos ----------
-Servo horizontal;                 // horizontal servo motor
+Servo horizontal;
 int servohori = 180;
 int servohoriLimitHigh = 175;
 int servohoriLimitLow  = 5;
 
-Servo vertical;                   // vertical servo motor
+Servo vertical;
 int servovert = 45;
 int servovertLimitHigh = 160;
 int servovertLimitLow  = 1;
 
-// ---------- Pins ----------
-int ldrlt = A0;                   // Top-Left LDR
-int ldrrt = A3;                   // Top-Right LDR
-int ldrld = A1;                   // Bottom-Left LDR
-int ldrrd = A2;                   // Bottom-Right LDR
-const uint8_t HORIZ_PIN = 5, VERT_PIN = 4, SD_CS = 10;   // keep 10 to 13 for the SD module
-
-// ---------- Variables ----------
 RTC_DS3231 rtc;
+Adafruit_INA219 inaPanel(INA_PANEL_ADDR);
+Adafruit_INA219 inaUno(INA_UNO_ADDR);
 int lt = 0, rt = 0, ld = 0, rd = 0;
 bool rtcOk = false, sdOk = false, wasActive = false;
-unsigned long lastTrack = 0, lastLog = 0;
+bool inaPanelOk = false, inaUnoOk = false;
+float pV = 0, pmA = 0, pmW = 0;
+float uV = 0, umA = 0, umW = 0;
+float netmW = 0, netmWh = 0;
+unsigned long lastTrack = 0, lastLog = 0, lastPower = 0, lastEnergy = 0, lastRetry = 0;
 
-bool i2cPresent(uint8_t addr) {   // true only if a device answers at this address
+bool i2cPresent(uint8_t addr) {
   Wire.beginTransmission(addr);
   return Wire.endTransmission() == 0;
 }
 
-void park() {                     // go back to the starting position
+void park() {
   servohori = 180;
   servovert = 45;
   horizontal.write(servohori);
   vertical.write(servovert);
+}
+
+void retryIna() {
+  if (!ENABLE_INA) return;
+  if (inaPanelOk && inaUnoOk) return;
+  if (millis() - lastRetry < INA_RETRY_MS) return;
+  lastRetry = millis();
+  if (!inaPanelOk) inaPanelOk = i2cPresent(INA_PANEL_ADDR) && inaPanel.begin();
+  if (!inaUnoOk)   inaUnoOk   = i2cPresent(INA_UNO_ADDR) && inaUno.begin();
+}
+
+void readPower() {
+  if (inaPanelOk) {
+    pV  = inaPanel.getBusVoltage_V();
+    pmA = inaPanel.getCurrent_mA();
+    pmW = inaPanel.getPower_mW();
+  } else {
+    pV = pmA = pmW = 0;
+  }
+  if (inaUnoOk) {
+    uV  = inaUno.getBusVoltage_V();
+    umA = inaUno.getCurrent_mA();
+    umW = inaUno.getPower_mW();
+  } else {
+    uV = umA = umW = 0;
+  }
+  unsigned long t = millis();
+  if (inaPanelOk && inaUnoOk) {
+    netmW = pmW - umW;
+    netmWh += netmW * (t - lastEnergy) / 3600000.0;
+  } else {
+    netmW = 0;
+  }
+  lastEnergy = t;
 }
 
 void track() {
@@ -59,10 +102,10 @@ void track() {
   ld = analogRead(ldrld);
   rd = analogRead(ldrrd);
 
-  int avt = (lt + rt) / 2;        // average top
-  int avd = (ld + rd) / 2;        // average bottom
-  int avl = (lt + ld) / 2;        // average left
-  int avr = (rt + rd) / 2;        // average right
+  int avt = (lt + rt) / 2;
+  int avd = (ld + rd) / 2;
+  int avl = (lt + ld) / 2;
+  int avr = (rt + rd) / 2;
 
   int dvert  = avt - avd;
   int dhoriz = avl - avr;
@@ -92,66 +135,93 @@ void logData() {
     snprintf(name, sizeof(name), "%02d%02d%02d.CSV",
              (int)(now.year() % 100), (int)now.month(), (int)now.day());
   } else {
-    snprintf(ts, sizeof(ts), "t+%lus", millis() / 1000);   // no clock: seconds since start
+    snprintf(ts, sizeof(ts), "t+%lus", millis() / 1000);
     strcpy(name, "TEST.CSV");
   }
 
-  // Always print to the Serial Monitor (works with or without a card or clock)
-  Serial.print(ts);
-  Serial.print(F("  lt ")); Serial.print(lt);
-  Serial.print(F(" rt ")); Serial.print(rt);
-  Serial.print(F(" ld ")); Serial.print(ld);
-  Serial.print(F(" rd ")); Serial.print(rd);
-  Serial.print(F("  hori ")); Serial.print(servohori);
-  Serial.print(F(" vert ")); Serial.println(servovert);
+  if (!sdOk || SERIAL_ALSO_WITH_SD) {
+    Serial.print(ts);
+    Serial.print(F("  lt ")); Serial.print(lt);
+    Serial.print(F(" rt ")); Serial.print(rt);
+    Serial.print(F(" ld ")); Serial.print(ld);
+    Serial.print(F(" rd ")); Serial.print(rd);
+    Serial.print(F("  hori ")); Serial.print(servohori);
+    Serial.print(F(" vert ")); Serial.print(servovert);
+    Serial.print(F("  P ")); Serial.print(pV, 2); Serial.print(F("V "));
+    Serial.print(pmA, 0); Serial.print(F("mA ")); Serial.print(pmW, 0); Serial.print(F("mW"));
+    Serial.print(F("  U ")); Serial.print(uV, 2); Serial.print(F("V "));
+    Serial.print(umA, 0); Serial.print(F("mA ")); Serial.print(umW, 0); Serial.print(F("mW"));
+    Serial.print(F("  net ")); Serial.print(netmW, 0); Serial.print(F("mW "));
+    Serial.print(netmWh, 2); Serial.println(F("mWh"));
+  }
 
-  if (!sdOk) return;              // no card: skip saving, keep running
+  if (!sdOk) return;
 
   bool isNew = !SD.exists(name);
   File f = SD.open(name, FILE_WRITE);
-  if (!f) return;                 // could not open the file: skip, keep running
-  if (isNew) f.println(F("time,lt,rt,ld,rd,hori,vert"));
+  if (!f) return;
+  if (isNew) f.println(F("time,lt,rt,ld,rd,hori,vert,pV,pmA,pmW,uV,umA,umW,netmW,netmWh"));
   f.print(ts);
   f.print(','); f.print(lt);
   f.print(','); f.print(rt);
   f.print(','); f.print(ld);
   f.print(','); f.print(rd);
   f.print(','); f.print(servohori);
-  f.print(','); f.println(servovert);
-  f.close();                      // closing saves the data safely
+  f.print(','); f.print(servovert);
+  f.print(','); f.print(pV, 2);
+  f.print(','); f.print(pmA, 1);
+  f.print(','); f.print(pmW, 1);
+  f.print(','); f.print(uV, 2);
+  f.print(','); f.print(umA, 1);
+  f.print(','); f.print(umW, 1);
+  f.print(','); f.print(netmW, 1);
+  f.print(','); f.println(netmWh, 3);
+  f.close();
 }
 
 void setup() {
   Serial.begin(BAUD);
   Serial.println(F("Ok."));
 
-  // 1) Servos first, so the tracker never depends on the clock or the card
-  horizontal.attach(HORIZ_PIN);
-  vertical.attach(VERT_PIN);
-  if (PARK_AT_START) park();
+  if (SERVOS_ON) {
+    horizontal.attach(HORIZ_PIN);
+    vertical.attach(VERT_PIN);
+    if (PARK_AT_START) park();
+  } else {
+    Serial.println(F("Servos off"));
+  }
 
-  // 2) Clock (optional): a stuck or missing I2C device can no longer freeze the sketch
   Wire.begin();
 #if defined(WIRE_HAS_TIMEOUT)
-  Wire.setWireTimeout(25000, true);       // give up after 25 ms instead of waiting forever
+  Wire.setWireTimeout(25000, true);
 #endif
+
   rtcOk = i2cPresent(0x68) && rtc.begin();
   if (!rtcOk) {
     Serial.println(F("No clock found: running without time"));
   } else {
     Serial.println(F("Clock ready"));
     if (SET_CLOCK || rtc.lostPower()) {
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));   // set to the time of upload
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
       Serial.println(F("Clock set"));
     }
   }
 
-  // 3) SD card (optional)
+  if (ENABLE_INA) {
+    inaPanelOk = i2cPresent(INA_PANEL_ADDR) && inaPanel.begin();
+    inaUnoOk   = i2cPresent(INA_UNO_ADDR) && inaUno.begin();
+    Serial.println(inaPanelOk ? F("INA219 #1 (panel) ready") : F("No INA219 #1: running without it"));
+    Serial.println(inaUnoOk   ? F("INA219 #2 (Uno) ready")   : F("No INA219 #2: running without it"));
+  } else {
+    Serial.println(F("INA219 disabled"));
+  }
+
   sdOk = SD.begin(SD_CS);
   if (sdOk) Serial.println(F("SD card ready"));
   else      Serial.println(F("No SD card: printing to Serial only"));
 
   delay(2500);
+  lastEnergy = lastPower = lastRetry = millis();
   Serial.println(F("Tracker ready"));
 }
 
@@ -162,7 +232,7 @@ void loop() {
     active = (now.hour() >= START_HOUR && now.hour() < END_HOUR);
   }
 
-  if (!active) {                  // outside the time window: park and wait
+  if (!active) {
     if (wasActive) {
       park();
       wasActive = false;
@@ -176,6 +246,11 @@ void loop() {
   if (t - lastTrack >= (unsigned long)dtime) {
     lastTrack = t;
     track();
+  }
+  if (t - lastPower >= POWER_MS) {
+    lastPower = t;
+    retryIna();
+    readPower();
   }
   if (t - lastLog >= LOG_MS) {
     lastLog = t;
