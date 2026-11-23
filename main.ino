@@ -14,8 +14,10 @@ const bool SERIAL_ALSO_WITH_SD = true;
 const bool SET_CLOCK = false;
 const uint8_t START_HOUR = 9;
 const uint8_t END_HOUR   = 17;
-const int tol   = 30;
-const int dtime = 10;
+const int tol   = 60; //60 mid, 30 sensitive, 120 not much
+const int dtime = 30;  // big fast slow bad
+const int LDR_MAX = 1000;
+const int LDR_MIN = 40;
 const int HORIZ_DIR = 1;
 const int VERT_DIR  = 1;
 const unsigned long LOG_MS       = 5000;
@@ -23,7 +25,9 @@ const unsigned long POWER_MS     = 1000;
 const unsigned long INA_RETRY_MS = 10000;
 const uint8_t INA_PANEL_ADDR = 0x40;
 const uint8_t INA_UNO_ADDR   = 0x41;
-const uint8_t HORIZ_PIN = 5, VERT_PIN = 4, SD_CS = 10;
+const uint8_t HORIZ_PIN = 5, VERT_PIN = 4, VERT_PIN2 = 7, SD_CS = 10;
+const bool VERT2_MIRROR = true;
+const int VERT2_OFFSET = 0;
 int ldrlt = A0;
 int ldrrt = A3;
 int ldrld = A1;
@@ -35,6 +39,7 @@ int servohoriLimitHigh = 175;
 int servohoriLimitLow  = 5;
 
 Servo vertical;
+Servo vertical2;
 int servovert = 45;
 int servovertLimitHigh = 160;
 int servovertLimitLow  = 1;
@@ -55,11 +60,24 @@ bool i2cPresent(uint8_t addr) {
   return Wire.endTransmission() == 0;
 }
 
+int readLdr(int pin) {
+  analogRead(pin);
+  long s = 0;
+  for (int i = 0; i < 8; i++) s += analogRead(pin);
+  return s / 8;
+}
+
+void writeVerticals() {
+  vertical.write(servovert);
+  int a = VERT2_MIRROR ? 180 - servovert : servovert;
+  vertical2.write(constrain(a + VERT2_OFFSET, 0, 180));
+}
+
 void park() {
   servohori = 180;
   servovert = 45;
   horizontal.write(servohori);
-  vertical.write(servovert);
+  writeVerticals();
 }
 
 void retryIna() {
@@ -97,10 +115,13 @@ void readPower() {
 }
 
 void track() {
-  lt = analogRead(ldrlt);
-  rt = analogRead(ldrrt);
-  ld = analogRead(ldrld);
-  rd = analogRead(ldrrd);
+  lt = readLdr(ldrlt);
+  rt = readLdr(ldrrt);
+  ld = readLdr(ldrld);
+  rd = readLdr(ldrrd);
+
+  if (lt > LDR_MAX && rt > LDR_MAX && ld > LDR_MAX && rd > LDR_MAX) return;
+  if (lt < LDR_MIN && rt < LDR_MIN && ld < LDR_MIN && rd < LDR_MIN) return;
 
   int avt = (lt + rt) / 2;
   int avd = (ld + rd) / 2;
@@ -114,7 +135,7 @@ void track() {
     if (avt > avd) servovert -= VERT_DIR;
     else           servovert += VERT_DIR;
     servovert = constrain(servovert, servovertLimitLow, servovertLimitHigh);
-    vertical.write(servovert);
+    writeVerticals();
   }
 
   if (abs(dhoriz) > tol) {
@@ -159,7 +180,10 @@ void logData() {
 
   bool isNew = !SD.exists(name);
   File f = SD.open(name, FILE_WRITE);
-  if (!f) return;
+  if (!f) {
+    Serial.println(F("SD open failed"));
+    return;
+  }
   if (isNew) f.println(F("time,lt,rt,ld,rd,hori,vert,pV,pmA,pmW,uV,umA,umW,netmW,netmWh"));
   f.print(ts);
   f.print(','); f.print(lt);
@@ -186,6 +210,7 @@ void setup() {
   if (SERVOS_ON) {
     horizontal.attach(HORIZ_PIN);
     vertical.attach(VERT_PIN);
+    vertical2.attach(VERT_PIN2);
     if (PARK_AT_START) park();
   } else {
     Serial.println(F("Servos off"));
